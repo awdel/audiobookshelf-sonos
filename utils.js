@@ -14,7 +14,7 @@ async function getLibraryItems() {
     };
 
     let path = `${ABS_URI}/api/libraries/${ABS_LIBRARY_ID}/items`;
-    logger.info("Fetching library item at:", path)
+    logger.info("Fetching library items at:", path)
 
     const { data } = await axios.get(path, config);
     return data;
@@ -39,13 +39,13 @@ async function getLibraryItem(libraryItemId) {
   }
 }
 
-async function getABSProgress(libraryItemId) {
+async function getABSProgress(libraryItemId, episodeId) {
   try {
     const config = {
       headers: { Authorization: `Bearer ${ABS_TOKEN}` },
     };
 
-    let path = `${ABS_URI}/api/me/progress/${libraryItemId}`;
+    let path = `${ABS_URI}/api/me/progress/${libraryItemId}/${episodeId ? episodeId : ""}`;
     logger.info("Fetching library item progress at:", path)
 
     const { data } = await axios.get(path, config);
@@ -98,22 +98,40 @@ async function buildLibraryMetadataResult(res) {
 
    for (const libraryItem of libraryItems) {
      // https://developer.sonos.com/build/content-service-add-features/save-resume-playback/
-     var mediaMetadataEntry = { 
-       itemType: "audiobook",
-       id: libraryItem.id,
-      //mimeType: libraryItem.media.audioFiles[0].mimeType,
-       canPlay: true,
-       canResume: true,
-       title: libraryItem.media.metadata.title,
-       summary: libraryItem.media.metadata.description,
-       //authorId: libraryItem.media.metadata.authors[0].id,
-       //author: libraryItem.media.metadata.authors[0].name,
-       //narratorId: libraryItem.media.metadata.narrators[0].id,
-       //narrator: libraryItem.media.metadata.narrators[0].name,
-       //albumArtURI: `${ABS_URI}${libraryItem.media.coverPath}?token=${ABS_TOKEN}`,
-     };  
+
+     var mediaMetadataEntry = {}
+
+     if (libraryItem.mediaType == "book") {
+      mediaMetadataEntry = { 
+        itemType: "audiobook",
+        id: libraryItem.id,
+        //mimeType: libraryItem.media.audioFiles[0].mimeType,
+        canPlay: true,
+        canResume: true,
+        title: libraryItem.media.metadata.title,
+        summary: libraryItem.media.metadata.description,
+        //authorId: libraryItem.media.metadata.authors[0].id,
+        //author: libraryItem.media.metadata.authors[0].name,
+        //narratorId: libraryItem.media.metadata.narrators[0].id,
+        //narrator: libraryItem.media.metadata.narrators[0].name,
+        //albumArtURI: `${ABS_URI}${libraryItem.media.coverPath}?token=${ABS_TOKEN}`,
+      };
+     } else if (libraryItem.mediaType == "podcast") {
+      mediaMetadataEntry = { 
+        albumArtURI: `${ABS_URI}/api/items/${libraryItem.id}/cover?token=${ABS_TOKEN}`,
+        canPlay: true,
+        canResume: true,
+        id: libraryItem.id,
+        itemType: "show",
+        semanticType: "podcast",
+        summary: libraryItem.media.metadata.description,
+        title: libraryItem.media.metadata.title,
+      };
+     }
+     
 
      logger.debug("libraryItem for mediaMetadataEntry:", libraryItem)
+     logger.debug("mediaMetadataEntry for buildLibraryMetadataResult:", libraryItem)
 
      mediaMetadata.push(mediaMetadataEntry);
    }   
@@ -170,7 +188,7 @@ async function buildAudiobookTrackList(libraryItem, progressData) {
       };
       logger.debug("positionInformation for library item", positionInformation)
     } catch (error) {
-      logger.derror("Error trying to get progressData", error.message)
+      logger.error("Error trying to get progressData", error.message)
     }
   }
 
@@ -183,6 +201,92 @@ async function buildAudiobookTrackList(libraryItem, progressData) {
       mediaMetadata: imediaMetadata,
     },
   };
+}
+
+async function buildPodcastEpisodeList(libraryItem) {
+  logger.info("Building podcast episode list")
+  let episodes = libraryItem.media.episodes;
+  let icount = episodes.length;
+  let itotal = episodes.length;
+  let imediaMetadata = [];
+
+  // if there is existing podcast progress, figure it out here and send it along
+  let absProgress = await getABSProgress(libraryItem.id);
+
+  let positionInformation = {};
+  if (absProgress) {
+    logger.info(`Progress data found from ABS for ${libraryItem.id}`)
+    try {
+      positionInformation = {
+        id: absProgress.libraryItemId,
+        index: 0,
+        offsetMillis: Math.round(absProgress.currentTime * 1000),
+        isCompleted: absProgress.isFinished,
+      };
+      logger.debug("positionInformation for library item", positionInformation)
+    } catch (error) {
+      logger.error("Error trying to get absProgress", error.message)
+    }
+  }
+
+  for (const episode of episodes) {
+    // if there is existing episode progress, figure it out here and send it along
+    let episodePositionInformation = {};
+    let absEpisodeProgress = await getABSProgress(libraryItem.id, episode.id);
+    if (absEpisodeProgress) {
+      logger.info(`Progress data found from ABS episode for ${episode.id}`)
+      try {
+        episodePositionInformation = {
+          id: absEpisodeProgress.episodeId,
+          index: 0,
+          offsetMillis: Math.round(absEpisodeProgress.currentTime * 1000),
+          isCompleted: absEpisodeProgress.isFinished,
+        };
+        logger.debug("episodePositionInformation for episode item", episodePositionInformation)
+      } catch (error) {
+        logger.error("Error trying to get absEpisodeProgress", error.message)
+      }
+    }
+
+    var mediaMetadataEntry = {
+      // id: `${episode.libraryItemId}|${episode.id}`,
+      id: `${libraryItem.media.libraryItemId}/file/${episode.audioFile.ino}`,
+      itemType: "track",
+      semanticType: "episode.podcast",
+      title: episode.title,
+      summary: episode.description,
+      positionInformation: episodePositionInformation,
+      releaseDate: new Date(episode.publishedAt).toISOString(),
+      mimeType: episode.audioFile.mimeType,
+      trackMetadata: {
+        podcastId: episode.podcastId,
+        podcast: libraryItem.media.metadata.title,
+        duration: Math.round(episode.audioFile.duration),
+        albumArtURI: `${ABS_URI}/api/items/${libraryItem.id}/cover?token=${ABS_TOKEN}`,
+        canPlay: true,
+        canResume: true,
+        canSeek: true,
+      }
+    };
+
+    imediaMetadata.push(mediaMetadataEntry);
+  }
+
+  logger.debug("imediaMetadata for buildPodcastEpisodeList", imediaMetadata)
+
+  const res = {
+    getMetadataResult: {
+      count: icount,
+      total: itotal,
+      index: 0,
+      positionInformation: positionInformation,
+      mediaMetadata: imediaMetadata,
+    },
+  };
+
+  logger.debug("getMetadataResult for buildPodcastEpisodeList:", res)
+
+  return res;
 }
 
 function partNameAndRelativeProgress(currentProgress, libraryItem) {
@@ -260,7 +364,7 @@ async function buildProgress(libraryItem, updateObject) {
 
 // Methods to invoke
 async function getMediaURI(id) {
-  logger.info("called with id", id)
+  logger.info("getMediaURI called with id", id)
   return await buildMediaURI(id);
 }
 
@@ -271,16 +375,23 @@ async function getMetadataResult(libraryItemId) {
   } else {
     let libraryItem = await getLibraryItem(libraryItemId);
 
-    // if there is existing progress, figure it out here and send it along
-    let absProgress = await getABSProgress(libraryItemId);
-    let progressData;
-    if (absProgress) {
-      logger.info("absProgress found! absProgress", absProgress)
-      progressData = partNameAndRelativeProgress(absProgress, libraryItem);
-      logger.debug("progressData from partNameAndRelativeProgress", progressData)
+    let list;
+    if (libraryItem.mediaType == "book") {
+      // if there is existing progress, figure it out here and send it along
+      let absProgress = await getABSProgress(libraryItemId);
+      let progressData;
+      if (absProgress) {
+        logger.info("absProgress found! absProgress", absProgress)
+        progressData = partNameAndRelativeProgress(absProgress, libraryItem);
+        logger.debug("progressData from partNameAndRelativeProgress", progressData)
+      }
+
+      list = await buildAudiobookTrackList(libraryItem, progressData);
+    } else if (libraryItem.mediaType == "podcast") {
+      list = await buildPodcastEpisodeList(libraryItem);
     }
 
-    return await buildAudiobookTrackList(libraryItem, progressData);
+    return list;
   }
 }
 
